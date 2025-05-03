@@ -25,6 +25,8 @@ runs:
           if (!pr) throw new Error('No PR number in context');
           const TZ = '${{ inputs.timezone }}';
           const commentHeader = '🚀 Deployment Status Dashboard';
+          const currentPrBranch = context.payload.pull_request?.head?.ref;
+          const currentPrSha = context.payload.pull_request?.head?.sha;
 
           function fmtDate(s) {
             if (!s) return 'Unknown';
@@ -64,15 +66,22 @@ runs:
           let body = `<h2>${commentHeader}</h2><table><thead><tr>`
                    + '<th>Environment</th><th>Status</th><th>Branch/Commit</th>'
                    + '<th>Deployed By</th><th>Last Deployment</th><th>URL</th>'
+                   + '<th>Availability</th>'
                    + '</tr></thead><tbody>';
 
           for (const e of envs) {
             const { data: [dep] } = await github.rest.repos.listDeployments({ owner, repo, environment:e, per_page:1 });
+            let availabilityStatus = '✅ Available for deployment';
+            let availabilityEmoji = '✅';
+            let availabilityMessage = 'Available for deployment';
+            
             if (!dep) {
               body += `<tr><td><strong>🔹 ${e}</strong></td><td>⚪️ No deployments</td>`
-                    + `<td>-</td><td>-</td><td>-</td><td>-</td></tr>`;
+                    + `<td>-</td><td>-</td><td>-</td><td>-</td>`
+                    + `<td>${availabilityEmoji} ${availabilityMessage}</td></tr>`;
               continue;
             }
+            
             const [{ data: det }, { data: [st] }] = await Promise.all([
               github.rest.repos.getDeployment({ owner, repo, deployment_id:dep.id }),
               github.rest.repos.listDeploymentStatuses({ owner, repo, deployment_id:dep.id, per_page:1 })
@@ -92,12 +101,29 @@ runs:
             const ref = dep.ref.replace('refs/heads/','');
             const sha = dep.sha.slice(0,7);
             const by  = st.creator?.login || det.creator?.login || 'Unknown';
+            
+            // Determine if the environment is occupied by this PR or another
+            if (ref === currentPrBranch || dep.sha === currentPrSha) {
+              availabilityEmoji = '✓';
+              availabilityMessage = 'Currently deployed from this PR';
+            } else if (['success', 'pending', 'in_progress'].includes(st.state)) {
+              availabilityEmoji = '⚠️';
+              availabilityMessage = `Occupied by ${ref}`;
+            } else if (['failure', 'error'].includes(st.state)) {
+              availabilityEmoji = '🔄';
+              availabilityMessage = 'Deployment failed, can be redeployed';
+            } else if (st.state === 'inactive') {
+              availabilityEmoji = '✅';
+              availabilityMessage = 'Available for deployment';
+            }
+            
             body += `<tr><td><strong>${envEmoji} ${e}</strong></td>`
                   + `<td>${statusEmoji} ${st.state||'unknown'}</td>`
                   + `<td>${ref} ([${sha}](https://github.com/${owner}/${repo}/commit/${dep.sha}))</td>`
                   + `<td>@${by}</td>`
                   + `<td>${fmtDate(st.created_at)}</td>`
                   + `<td>${(st.environment_url||st.target_url) ? mkLink(st.environment_url||st.target_url,'View deployment') : '-'}</td>`
+                  + `<td>${availabilityEmoji} ${availabilityMessage}</td>`
                   + `</tr>`;
           }
 
